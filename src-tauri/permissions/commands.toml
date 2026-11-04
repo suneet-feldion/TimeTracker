@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-load-state"
+description = "Read the local planner file."
+commands.allow = ["load_state"]
+
+[[permission]]
+identifier = "allow-save-state"
+description = "Write the local planner file."
+commands.allow = ["save_state"]

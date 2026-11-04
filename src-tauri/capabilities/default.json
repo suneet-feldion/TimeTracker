@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Read and write the local planner file.",
+  "windows": ["main"],
+  "permissions": ["core:default", "allow-load-state", "allow-save-state"]
+}
