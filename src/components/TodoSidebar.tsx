@@ -5,6 +5,11 @@ import { useStore } from '../state/store'
 import { ColorSwatches } from './ColorSwatches'
 import { IconChevron, IconGrip, IconPlus, IconTrash } from './icons'
 
+type Dragging = { kind: 'todo'; id: string } | { kind: 'subtodo'; id: string; parentId: string }
+type DropTarget = { list: string; slot: number }
+
+const TODO_LIST = 'todos'
+
 export function TodoSidebar() {
   const { t } = useI18n()
   const todos = useStore((state) => state.todos)
@@ -18,7 +23,12 @@ export function TodoSidebar() {
   const addSubtodo = useStore((state) => state.addSubtodo)
   const setSubtodoTitle = useStore((state) => state.setSubtodoTitle)
   const deleteSubtodo = useStore((state) => state.deleteSubtodo)
+  const moveTodo = useStore((state) => state.moveTodo)
+  const moveSubtodo = useStore((state) => state.moveSubtodo)
   const [menu, setMenu] = useState<{ id: string; top: number; left: number } | null>(null)
+  // WebKit hides dataTransfer contents during dragover, so the dragged item is tracked here.
+  const [dragging, setDragging] = useState<Dragging | null>(null)
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
 
   useEffect(() => {
     if (!focusId) return
@@ -40,6 +50,42 @@ export function TodoSidebar() {
   const ordered = [...todos].sort((a, b) => a.order - b.order)
   const menuTodo = ordered.find((todo) => todo.id === menu?.id)
 
+  const endDrag = () => {
+    setDragging(null)
+    setDropTarget(null)
+  }
+
+  const showDrop = (list: string, slot: number) => {
+    setDropTarget((current) => (current?.list === list && current.slot === slot ? current : { list, slot }))
+  }
+
+  const dropMark = (list: string, index: number, count: number): string => {
+    if (dropTarget?.list !== list) return ''
+    if (dropTarget.slot === index) return ' drop-before'
+    if (dropTarget.slot === count && index === count - 1) return ' drop-after'
+    return ''
+  }
+
+  const onScrollDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented) return
+    if (dragging?.kind === 'todo' && ordered.length > 0) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'move'
+      showDrop(TODO_LIST, ordered.length)
+      return
+    }
+    setDropTarget(null)
+  }
+
+  const onScrollDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented) return
+    if (dragging?.kind === 'todo') {
+      event.preventDefault()
+      moveTodo(dragging.id, ordered.length)
+    }
+    endDrag()
+  }
+
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
@@ -48,14 +94,38 @@ export function TodoSidebar() {
           <IconPlus />
         </button>
       </div>
-      <div className="todo-scroll">
+      <div
+        className="todo-scroll"
+        onDragOver={onScrollDragOver}
+        onDrop={onScrollDrop}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node)) return
+          setDropTarget(null)
+        }}
+      >
         {ordered.length === 0 && <p className="empty">{t('emptyTodos')}</p>}
         <ul className="todo-list">
-          {ordered.map((todo) => {
+          {ordered.map((todo, index) => {
             const palette = colorById(todo.color)
             const children = [...todo.children].sort((a, b) => a.order - b.order)
+            const isDragged = dragging?.id === todo.id
             return (
-              <li key={todo.id}>
+              <li
+                key={todo.id}
+                className={`todo-item${isDragged ? ' dragging' : ''}${dropMark(TODO_LIST, index, ordered.length)}`}
+                onDragOver={(event) => {
+                  if (dragging?.kind !== 'todo') return
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect = 'move'
+                  showDrop(TODO_LIST, slotAt(event, index))
+                }}
+                onDrop={(event) => {
+                  if (dragging?.kind !== 'todo') return
+                  event.preventDefault()
+                  moveTodo(dragging.id, slotAt(event, index))
+                  endDrag()
+                }}
+              >
                 <div className="todo-row">
                   <span
                     className="grip"
@@ -63,7 +133,12 @@ export function TodoSidebar() {
                     role="img"
                     aria-label={t('dragTodo')}
                     title={t('dragTodo')}
-                    onDragStart={(event) => startDrag(event, 'todo', todo.id)}
+                    onDragStart={(event) => {
+                      if (startDrag(event, 'todo', todo.id)) {
+                        window.setTimeout(() => setDragging({ kind: 'todo', id: todo.id }))
+                      }
+                    }}
+                    onDragEnd={endDrag}
                   >
                     <IconGrip />
                   </span>
@@ -105,8 +180,23 @@ export function TodoSidebar() {
                 </div>
                 {!todo.collapsed && children.length > 0 && (
                   <ul className="subtodo-list">
-                    {children.map((child) => (
-                      <li key={child.id}>
+                    {children.map((child, childIndex) => (
+                      <li
+                        key={child.id}
+                        className={`todo-item${dragging?.id === child.id ? ' dragging' : ''}${dropMark(todo.id, childIndex, children.length)}`}
+                        onDragOver={(event) => {
+                          if (dragging?.kind !== 'subtodo' || dragging.parentId !== todo.id) return
+                          event.preventDefault()
+                          event.dataTransfer.dropEffect = 'move'
+                          showDrop(todo.id, slotAt(event, childIndex))
+                        }}
+                        onDrop={(event) => {
+                          if (dragging?.kind !== 'subtodo' || dragging.parentId !== todo.id) return
+                          event.preventDefault()
+                          moveSubtodo(todo.id, dragging.id, slotAt(event, childIndex))
+                          endDrag()
+                        }}
+                      >
                         <div className="todo-row sub">
                           <span
                             className="grip"
@@ -114,7 +204,12 @@ export function TodoSidebar() {
                             role="img"
                             aria-label={t('dragTodo')}
                             title={t('dragTodo')}
-                            onDragStart={(event) => startDrag(event, 'subtodo', child.id)}
+                            onDragStart={(event) => {
+                              if (startDrag(event, 'subtodo', child.id)) {
+                                window.setTimeout(() => setDragging({ kind: 'subtodo', id: child.id, parentId: todo.id }))
+                              }
+                            }}
+                            onDragEnd={endDrag}
                           >
                             <IconGrip />
                           </span>
@@ -160,14 +255,25 @@ export function TodoSidebar() {
   )
 }
 
-function startDrag(event: DragEvent, kind: 'todo' | 'subtodo', id: string) {
+function startDrag(event: DragEvent<HTMLElement>, kind: 'todo' | 'subtodo', id: string): boolean {
   const target = event.target
   if (target instanceof Element && target.closest('input, button')) {
     event.preventDefault()
-    return
+    return false
   }
-  const payload = JSON.stringify({ kind, id })
-  event.dataTransfer.setData('application/x-timetracker', payload)
-  event.dataTransfer.setData('text/plain', payload)
-  event.dataTransfer.effectAllowed = 'copy'
+  event.dataTransfer.setData('application/x-timetracker', JSON.stringify({ kind, id }))
+  event.dataTransfer.effectAllowed = 'copyMove'
+  const row = event.currentTarget.closest('.todo-row')
+  if (row instanceof HTMLElement) {
+    const rect = row.getBoundingClientRect()
+    event.dataTransfer.setDragImage(row, event.clientX - rect.left, event.clientY - rect.top)
+  }
+  return true
+}
+
+/** Slot before or after the item, split at the middle of its own row so expanded children don't count. */
+function slotAt(event: DragEvent<HTMLElement>, index: number): number {
+  const row = event.currentTarget.querySelector('.todo-row') ?? event.currentTarget
+  const rect = row.getBoundingClientRect()
+  return event.clientY > rect.top + rect.height / 2 ? index + 1 : index
 }

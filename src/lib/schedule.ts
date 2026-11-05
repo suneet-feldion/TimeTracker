@@ -206,6 +206,17 @@ export function pastedEntry(source: Entry, weekStart: string, dayIndex: number, 
   }
 }
 
+/** `slot` is a gap in the current order: 0 is before the first item, `items.length` after the last. */
+export function reorder<T extends { id: string; order: number }>(items: T[], id: string, slot: number): T[] {
+  const sorted = [...items].sort((a, b) => a.order - b.order)
+  const from = sorted.findIndex((item) => item.id === id)
+  if (from === -1) return items
+  const [moved] = sorted.splice(from, 1)
+  const bounded = Math.min(Math.max(slot, 0), sorted.length + 1)
+  sorted.splice(bounded > from ? bounded - 1 : bounded, 0, moved)
+  return sorted.map((item, order) => (item.order === order ? item : { ...item, order }))
+}
+
 export function lookupLink(todos: Todo[], link: EntryLink): { title: string; color: ColorId } | null {
   if (link.kind === 'todo') {
     const todo = todos.find((item) => item.id === link.id)

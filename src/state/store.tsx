@@ -4,6 +4,7 @@ import {
   lookupLink,
   pastedEntry,
   previousWeek,
+  reorder,
   resolveDisplay,
   shiftWeek as moveWeek,
   withActualTimes,
@@ -73,6 +74,8 @@ type StoreValue = {
   addSubtodo: (todoId: string) => void
   setSubtodoTitle: (todoId: string, id: string, title: string) => void
   deleteSubtodo: (todoId: string, id: string) => void
+  moveTodo: (id: string, slot: number) => void
+  moveSubtodo: (todoId: string, id: string, slot: number) => void
   addEntry: (input: NewEntry) => string
   updateEntryTimes: (id: string, lane: Lane, start: number, end: number, dayIndex?: number) => void
   setEntryTitle: (id: string, title: string) => void
@@ -236,6 +239,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ),
         }))
         setFocusId(id)
+      },
+      moveTodo: (id, slot) => {
+        update((value) => ({ ...value, todos: reorder(value.todos, id, slot) }))
+      },
+      moveSubtodo: (todoId, id, slot) => {
+        update((value) => ({
+          ...value,
+          todos: value.todos.map((todo) =>
+            todo.id === todoId ? { ...todo, children: reorder(todo.children, id, slot) } : todo,
+          ),
+        }))
       },
       setSubtodoTitle: (todoId, id, title) => {
         update((value) =>

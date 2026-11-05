@@ -11,6 +11,7 @@ import {
   pastedEntry,
   placeDuration,
   rangeFromDrag,
+  reorder,
   resolveDisplay,
   resizeEnd,
   resizeStart,
@@ -159,6 +160,36 @@ describe('linked todos', () => {
       title: 'Gym',
       color: 'amber',
     })
+  })
+})
+
+describe('reordering', () => {
+  const items = [
+    { id: 'c', order: 2 },
+    { id: 'a', order: 0 },
+    { id: 'b', order: 1 },
+  ]
+  const ids = (list: { id: string; order: number }[]) =>
+    [...list].sort((x, y) => x.order - y.order).map((item) => item.id)
+
+  it('moves an item up and renumbers the order', () => {
+    const result = reorder(items, 'c', 0)
+    expect(ids(result)).toEqual(['c', 'a', 'b'])
+    expect(result.map((item) => item.order)).toEqual([0, 1, 2])
+  })
+
+  it('moves an item down past later items', () => {
+    expect(ids(reorder(items, 'a', 3))).toEqual(['b', 'c', 'a'])
+    expect(ids(reorder(items, 'a', 2))).toEqual(['b', 'a', 'c'])
+  })
+
+  it('keeps the order when dropped next to itself', () => {
+    expect(ids(reorder(items, 'b', 1))).toEqual(['a', 'b', 'c'])
+    expect(ids(reorder(items, 'b', 2))).toEqual(['a', 'b', 'c'])
+  })
+
+  it('ignores an unknown id', () => {
+    expect(reorder(items, 'missing', 0)).toBe(items)
   })
 })
 

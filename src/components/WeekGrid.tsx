@@ -176,7 +176,7 @@ export function WeekGrid() {
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     setOver(null)
-    const raw = event.dataTransfer.getData('application/x-timetracker') || event.dataTransfer.getData('text/plain')
+    const raw = event.dataTransfer.getData('application/x-timetracker')
     if (!raw) return
     let payload: { kind?: string; id?: string }
     try {
@@ -213,7 +213,9 @@ export function WeekGrid() {
         data-lane={lane}
         onPointerDown={onLanePointerDown}
         onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes('application/x-timetracker')) return
           event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
           setOver((current) => (current?.day === day && current.lane === lane ? current : { day, lane }))
         }}
         onDragLeave={(event) => {
