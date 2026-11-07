@@ -1,6 +1,6 @@
 [package]
 name = "timetracker"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local weekly planner"
 authors = ["Suneet"]
 edition = "2021"
