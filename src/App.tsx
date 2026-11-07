@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { EntryPopover } from './components/EntryPopover'
+import { ScopeDialog } from './components/ScopeDialog'
 import { TodoSidebar } from './components/TodoSidebar'
 import { TopBar } from './components/TopBar'
 import { WeekGrid } from './components/WeekGrid'
@@ -10,13 +11,15 @@ export function App() {
   const ready = useStore((state) => state.ready)
   const language = useStore((state) => state.settings.language)
   const confirmCopy = useStore((state) => state.confirmCopy)
-  const editingId = useStore((state) => state.editingId)
+  const editing = useStore((state) => state.editing)
+  const pendingScope = useStore((state) => state.pendingScope)
   const shiftWeek = useStore((state) => state.shiftWeek)
   const copySelected = useStore((state) => state.copySelected)
   const paste = useStore((state) => state.paste)
   const deleteSelected = useStore((state) => state.deleteSelected)
   const setEditing = useStore((state) => state.setEditing)
-  const selectEntry = useStore((state) => state.selectEntry)
+  const selectOccurrence = useStore((state) => state.selectOccurrence)
+  const cancelScope = useStore((state) => state.cancelScope)
   const confirmCopyPreviousWeek = useStore((state) => state.confirmCopyPreviousWeek)
   const cancelCopyPreviousWeek = useStore((state) => state.cancelCopyPreviousWeek)
 
@@ -28,16 +31,20 @@ export function App() {
   useEffect(() => {
     if (!ready) return
     const onKey = (event: KeyboardEvent) => {
+      if (pendingScope) {
+        if (event.key === 'Escape') cancelScope()
+        return
+      }
       if (confirmCopy) {
         if (event.key === 'Escape') cancelCopyPreviousWeek()
         if (event.key === 'Enter') confirmCopyPreviousWeek()
         return
       }
       const target = event.target
-      const typing = target instanceof HTMLElement && target.closest('input, textarea, [contenteditable="true"]')
+      const typing = target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable="true"]')
       if (event.key === 'Escape') {
         setEditing(null)
-        selectEntry(null)
+        selectOccurrence(null)
         return
       }
       if (typing) return
@@ -53,7 +60,7 @@ export function App() {
       } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'v') {
         event.preventDefault()
         paste()
-      } else if (!editingId && (event.key === 'Delete' || event.key === 'Backspace')) {
+      } else if (!editing && (event.key === 'Delete' || event.key === 'Backspace')) {
         event.preventDefault()
         deleteSelected()
       }
@@ -62,14 +69,16 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [
     cancelCopyPreviousWeek,
+    cancelScope,
     confirmCopy,
     confirmCopyPreviousWeek,
     copySelected,
     deleteSelected,
-    editingId,
+    editing,
     paste,
+    pendingScope,
     ready,
-    selectEntry,
+    selectOccurrence,
     setEditing,
     shiftWeek,
   ])
@@ -84,6 +93,7 @@ export function App() {
         <WeekGrid />
       </div>
       <EntryPopover />
+      <ScopeDialog />
       <ConfirmDialog />
     </div>
   )

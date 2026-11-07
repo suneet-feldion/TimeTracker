@@ -33,5 +33,20 @@
   "thu": "Do",
   "fri": "Fr",
   "sat": "Sa",
-  "sun": "So"
+  "sun": "So",
+  "repeat": "Wiederholung",
+  "repeatNone": "Einmalig",
+  "repeatDaily": "Täglich",
+  "repeatWeekdays": "Werktags (Mo–Fr)",
+  "repeatWeekly": "Wöchentlich",
+  "repeatMonthly": "Monatlich",
+  "note": "Notiz",
+  "notePlaceholder": "Notiz hinzufügen",
+  "removeActual": "Ist entfernen",
+  "repeatScopeTitle": "Wiederkehrenden Termin ändern?",
+  "repeatScopeBody": "Soll die Änderung nur für diesen Termin, für diesen und alle folgenden oder für die ganze Serie gelten?",
+  "repeatRuleBody": "Soll die Wiederholung ab diesem Termin oder für die ganze Serie gelten?",
+  "scopeOne": "Nur diesen",
+  "scopeFollowing": "Diesen und folgende",
+  "scopeAll": "Alle Termine"
 }

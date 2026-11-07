@@ -1,7 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
+  addDays,
+  applyScopedChange,
+  blankEntryFields,
   copyWeekEntries,
+  entryAnchor,
   lookupLink,
+  occurrenceDisplay,
+  occurrenceOn,
   pastedEntry,
   previousWeek,
   reorder,
@@ -9,6 +15,8 @@ import {
   shiftWeek as moveWeek,
   withActualTimes,
   withPlanTimes,
+  type EntryChange,
+  type OccurrenceRef,
 } from '../lib/schedule'
 import { createDefaultState, loadState, saveState } from '../lib/storage'
 import {
@@ -19,6 +27,7 @@ import {
   type EntryLink,
   type Lane,
   type Language,
+  type Scope,
   type Settings,
   type Todo,
 } from '../lib/types'
@@ -52,14 +61,51 @@ export type NewEntry = {
   link?: EntryLink | null
 }
 
+export type PendingScope = {
+  ref: OccurrenceRef
+  changes: EntryChange[]
+  allowOne: boolean
+}
+
+function applyLinkChange(todos: Todo[], entry: Entry, change: EntryChange): Todo[] {
+  if (!entry.link) return todos
+  if (change.kind === 'title') {
+    const title = change.title
+    if (entry.link.kind === 'todo') {
+      return todos.map((todo) => (todo.id === entry.link?.id ? { ...todo, title } : todo))
+    }
+    const childId = entry.link.id
+    return todos.map((todo) => ({
+      ...todo,
+      children: todo.children.map((child) => (child.id === childId ? { ...child, title } : child)),
+    }))
+  }
+  if (change.kind === 'color') {
+    const color = change.color
+    const parentId =
+      entry.link.kind === 'todo'
+        ? entry.link.id
+        : todos.find((todo) => todo.children.some((child) => child.id === entry.link?.id))?.id
+    if (!parentId) return todos
+    return todos.map((todo) => (todo.id === parentId ? { ...todo, color } : todo))
+  }
+  return todos
+}
+
+function retarget(current: OccurrenceRef | null, from: OccurrenceRef, focus: OccurrenceRef | null): OccurrenceRef | null {
+  if (!current || current.id !== from.id || current.originDate !== from.originDate) return current
+  return focus ? { ...focus, lane: current.lane } : null
+}
+
 type StoreValue = {
   ready: boolean
   todos: Todo[]
   entries: Entry[]
   settings: Settings
-  selectedId: string | null
+  selected: OccurrenceRef | null
   pasteDay: number | null
-  editingId: string | null
+  editing: OccurrenceRef | null
+  pendingScope: PendingScope | null
   confirmCopy: boolean
   focusId: string | null
   clearFocus: () => void
@@ -77,14 +123,13 @@ type StoreValue = {
   moveTodo: (id: string, slot: number) => void
   moveSubtodo: (todoId: string, id: string, slot: number) => void
   addEntry: (input: NewEntry) => string
-  updateEntryTimes: (id: string, lane: Lane, start: number, end: number, dayIndex?: number) => void
-  setEntryTitle: (id: string, title: string) => void
-  setEntryColor: (id: string, color: ColorId) => void
-  deleteEntry: (id: string) => void
+  requestChange: (ref: OccurrenceRef, changes: EntryChange[]) => void
+  confirmScope: (scope: Scope) => void
+  cancelScope: () => void
   deleteSelected: () => void
-  selectEntry: (id: string | null) => void
+  selectOccurrence: (ref: OccurrenceRef | null) => void
   setPasteDay: (day: number | null) => void
-  setEditing: (id: string | null) => void
+  setEditing: (ref: OccurrenceRef | null) => void
   copySelected: () => void
   paste: () => void
   requestCopyPreviousWeek: () => void
@@ -96,9 +141,10 @@ const StoreContext = createContext<StoreValue | null>(null)
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selected, setSelected] = useState<OccurrenceRef | null>(null)
   const [pasteDay, setPasteDay] = useState<number | null>(null)
-  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editing, setEditing] = useState<OccurrenceRef | null>(null)
+  const [pendingScope, setPendingScope] = useState<PendingScope | null>(null)
   const [confirmCopy, setConfirmCopy] = useState(false)
   const [clipboard, setClipboard] = useState<Entry | null>(null)
   const [focusId, setFocusId] = useState<string | null>(null)
@@ -129,8 +175,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
 
     const clearSelection = () => {
-      setSelectedId(null)
-      setEditingId(null)
+      setSelected(null)
+      setEditing(null)
+      setPendingScope(null)
+    }
+
+    const commit = (ref: OccurrenceRef, scope: Scope, changes: EntryChange[]) => {
+      if (!state) return
+      let next = state
+      let cursor = ref
+      let focus: OccurrenceRef | null = ref
+      for (const change of changes) {
+        const entry = next.entries.find((item) => item.id === cursor.id)
+        if (!entry) {
+          focus = null
+          break
+        }
+        const applied = applyScopedChange(next.entries, cursor, scope, change, createId)
+        const anchor = entryAnchor(entry)
+        const whole = scope === 'all' || (scope === 'following' && cursor.originDate <= anchor)
+        if (entry.link && cursor.lane === 'plan' && whole && (change.kind === 'title' || change.kind === 'color')) {
+          next = syncSnapshots({
+            ...next,
+            todos: applyLinkChange(next.todos, entry, change),
+            entries: applied.entries,
+          })
+        } else {
+          next = { ...next, entries: applied.entries }
+        }
+        focus = applied.focus
+        if (!focus) break
+        cursor = focus
+      }
+      setState(next)
+      setSelected((current) => retarget(current, ref, focus))
+      setEditing((current) => retarget(current, ref, focus))
     }
 
     const replaceWeek = (value: AppState): AppState => {
@@ -147,9 +226,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       todos: current.todos,
       entries: current.entries,
       settings: current.settings,
-      selectedId,
+      selected,
       pasteDay,
-      editingId,
+      editing,
+      pendingScope,
       confirmCopy,
       focusId,
       clearFocus: () => setFocusId(null),
@@ -283,6 +363,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const linked = link ? lookupLink(value.todos, link) : null
           if (link && !linked) return value
           const entry: Entry = {
+            ...blankEntryFields(),
             id,
             weekStart: value.settings.weekStart,
             dayIndex: input.dayIndex,
@@ -294,95 +375,91 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             actualStart: input.start,
             actualEnd: input.end,
             actualCustomized: input.lane === 'actual',
+            actualOnly: input.lane === 'actual',
           }
           const timed = input.lane === 'actual' ? withActualTimes(entry, input.start, input.end) : withPlanTimes(entry, input.start, input.end)
-          return { ...value, entries: [...value.entries, { ...timed, id, link, actualCustomized: input.lane === 'actual' }] }
+          return {
+            ...value,
+            entries: [...value.entries, { ...timed, id, link, actualCustomized: input.lane === 'actual', actualOnly: input.lane === 'actual' }],
+          }
         })
-        setSelectedId(id)
+        const lane = input.lane ?? 'plan'
+        setSelected(state ? { id, originDate: addDays(state.settings.weekStart, input.dayIndex), lane } : null)
         return id
       },
-      updateEntryTimes: (id, lane, start, end, dayIndex) => {
-        update((value) => ({
-          ...value,
-          entries: value.entries.map((entry) => {
-            if (entry.id !== id) return entry
-            const timed = lane === 'plan' ? withPlanTimes(entry, start, end) : withActualTimes(entry, start, end)
-            if (lane === 'plan' && dayIndex !== undefined) return { ...timed, dayIndex }
-            return timed
-          }),
-        }))
-      },
-      setEntryTitle: (id, title) => {
-        update((value) => {
-          const entry = value.entries.find((item) => item.id === id)
-          if (!entry) return value
-          if (!entry.link) {
-            return { ...value, entries: value.entries.map((item) => (item.id === id ? { ...item, title } : item)) }
-          }
-          const todos = value.todos.map((todo) => {
-            if (entry.link?.kind === 'todo' && todo.id === entry.link.id) return { ...todo, title }
-            if (entry.link?.kind === 'subtodo') {
-              return {
-                ...todo,
-                children: todo.children.map((child) => (child.id === entry.link?.id ? { ...child, title } : child)),
-              }
-            }
-            return todo
-          })
-          return syncSnapshots({ ...value, todos })
-        })
-      },
-      setEntryColor: (id, color) => {
-        update((value) => {
-          const entry = value.entries.find((item) => item.id === id)
-          if (!entry) return value
-          if (!entry.link) {
-            return { ...value, entries: value.entries.map((item) => (item.id === id ? { ...item, color } : item)) }
-          }
-          const parentId =
-            entry.link.kind === 'todo'
-              ? entry.link.id
-              : value.todos.find((todo) => todo.children.some((child) => child.id === entry.link?.id))?.id
-          if (!parentId) return value
-          return syncSnapshots({
-            ...value,
-            todos: value.todos.map((todo) => (todo.id === parentId ? { ...todo, color } : todo)),
-          })
-        })
-      },
-      deleteEntry: (id) => {
-        update((value) => ({ ...value, entries: value.entries.filter((entry) => entry.id !== id) }))
-        if (selectedId === id) setSelectedId(null)
-        if (editingId === id) setEditingId(null)
-      },
-      deleteSelected: () => {
-        if (!selectedId) return
-        const id = selectedId
-        update((value) => ({ ...value, entries: value.entries.filter((entry) => entry.id !== id) }))
-        setSelectedId(null)
-        setEditingId(null)
-      },
-      selectEntry: setSelectedId,
-      setPasteDay,
-      setEditing: setEditingId,
-      copySelected: () => {
-        if (!state || !selectedId) return
-        const entry = state.entries.find((item) => item.id === selectedId)
+      requestChange: (ref, changes) => {
+        if (!state || changes.length === 0) return
+        const entry = state.entries.find((item) => item.id === ref.id)
         if (!entry) return
-        const display = resolveDisplay(entry, state.todos)
-        setClipboard({ ...entry, title: display.title, color: display.color })
+        if (entry.repeat === 'none') {
+          commit(ref, 'all', changes)
+          return
+        }
+        setPendingScope({ ref, changes, allowOne: changes.every((change) => change.kind !== 'repeat') })
+      },
+      confirmScope: (scope) => {
+        if (!pendingScope) return
+        commit(pendingScope.ref, scope, pendingScope.changes)
+        setPendingScope(null)
+      },
+      cancelScope: () => setPendingScope(null),
+      deleteSelected: () => {
+        if (!selected) return
+        const entry = state?.entries.find((item) => item.id === selected.id)
+        if (!entry) return
+        if (entry.repeat === 'none') {
+          commit(selected, 'all', [{ kind: 'delete' }])
+          return
+        }
+        setPendingScope({ ref: selected, changes: [{ kind: 'delete' }], allowOne: true })
+      },
+      selectOccurrence: setSelected,
+      setPasteDay,
+      setEditing,
+      copySelected: () => {
+        if (!state || !selected) return
+        const entry = state.entries.find((item) => item.id === selected.id)
+        if (!entry) return
+        const occurrence = occurrenceOn(entry, selected.originDate)
+        if (!occurrence) return
+        const actualOnly = occurrence.actualOnly
+        const display = occurrenceDisplay(occurrence, state.todos, actualOnly ? 'actual' : 'plan')
+        const start = actualOnly ? occurrence.actualStart : occurrence.planStart
+        const end = actualOnly ? occurrence.actualEnd : occurrence.planEnd
+        setClipboard({
+          ...blankEntryFields(),
+          id: occurrence.id,
+          weekStart: occurrence.weekStart,
+          dayIndex: occurrence.dayIndex,
+          link: actualOnly ? null : occurrence.link,
+          title: display.title,
+          color: display.color,
+          planStart: start,
+          planEnd: end,
+          actualStart: start,
+          actualEnd: end,
+          actualCustomized: actualOnly,
+          actualOnly,
+          actualTitle: actualOnly ? occurrence.actualTitle : null,
+          actualColor: actualOnly ? occurrence.actualColor : null,
+          planNote: actualOnly ? '' : occurrence.planNote,
+          actualNote: occurrence.actualNote,
+        })
       },
       paste: () => {
-        if (!clipboard) return
+        if (!clipboard || !state) return
         const id = createId()
         const day = pasteDay ?? clipboard.dayIndex
-        update((value) => {
-          const display = resolveDisplay(clipboard, value.todos)
-          const next = pastedEntry({ ...clipboard, title: display.title, color: display.color }, value.settings.weekStart, day, id)
-          return { ...value, entries: [...value.entries, next] }
-        })
-        setSelectedId(id)
-        setEditingId(null)
+        const display = resolveDisplay(clipboard, state.todos)
+        const next = pastedEntry(
+          { ...clipboard, title: display.title, color: display.color },
+          state.settings.weekStart,
+          day,
+          id,
+        )
+        setState({ ...state, entries: [...state.entries, next] })
+        setSelected({ id, originDate: entryAnchor(next), lane: next.actualOnly ? 'actual' : 'plan' })
+        setEditing(null)
       },
       requestCopyPreviousWeek: () => {
         if (!state) return
@@ -404,7 +481,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       },
       cancelCopyPreviousWeek: () => setConfirmCopy(false),
     }
-  }, [clipboard, confirmCopy, editingId, focusId, pasteDay, selectedId, state])
+  }, [clipboard, confirmCopy, editing, focusId, pasteDay, pendingScope, selected, state])
 
   return <StoreContext.Provider value={api}>{children}</StoreContext.Provider>
 }

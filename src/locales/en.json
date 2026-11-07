@@ -33,5 +33,20 @@
   "thu": "Thu",
   "fri": "Fri",
   "sat": "Sat",
-  "sun": "Sun"
+  "sun": "Sun",
+  "repeat": "Repeat",
+  "repeatNone": "Once",
+  "repeatDaily": "Daily",
+  "repeatWeekdays": "Weekdays (Mon–Fri)",
+  "repeatWeekly": "Weekly",
+  "repeatMonthly": "Monthly",
+  "note": "Note",
+  "notePlaceholder": "Add a note",
+  "removeActual": "Remove actual",
+  "repeatScopeTitle": "Change repeating entry?",
+  "repeatScopeBody": "Apply this change to this entry only, to this and all following entries, or to the whole series?",
+  "repeatRuleBody": "Apply this repeat rule from this entry on, or to the whole series?",
+  "scopeOne": "Only this",
+  "scopeFollowing": "This and following",
+  "scopeAll": "All entries"
 }

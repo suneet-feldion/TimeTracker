@@ -1,6 +1,17 @@
 import { invoke } from '@tauri-apps/api/core'
 import { mondayOf } from './schedule'
-import { COLOR_IDS, type AppState, type ColorId, type Entry, type Language, type SubTodo, type Todo } from './types'
+import {
+  REPEAT_IDS,
+  normalizeColor,
+  type AppState,
+  type ColorId,
+  type Entry,
+  type Language,
+  type OccurrenceException,
+  type Repeat,
+  type SubTodo,
+  type Todo,
+} from './types'
 
 const STORAGE_KEY = 'timetracker'
 
@@ -27,7 +38,7 @@ export function createDefaultState(): AppState {
 }
 
 function isColor(value: unknown): value is ColorId {
-  return typeof value === 'string' && (COLOR_IDS as readonly string[]).includes(value)
+  return normalizeColor(value) !== null
 }
 
 function isIsoDate(value: unknown): value is string {
@@ -46,7 +57,7 @@ function isTodo(value: unknown): value is Todo {
   return (
     typeof item.id === 'string' &&
     typeof item.title === 'string' &&
-    isColor(item.color) &&
+    normalizeColor(item.color) !== null &&
     typeof item.collapsed === 'boolean' &&
     typeof item.order === 'number' &&
     Array.isArray(item.children) &&
@@ -54,27 +65,86 @@ function isTodo(value: unknown): value is Todo {
   )
 }
 
-function isEntry(value: unknown): value is Entry {
-  if (!value || typeof value !== 'object') return false
-  const item = value as Entry
+function isRepeat(value: unknown): value is Repeat {
+  return typeof value === 'string' && (REPEAT_IDS as readonly string[]).includes(value)
+}
+
+function normalizeException(value: unknown): OccurrenceException | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as OccurrenceException
+  if (!isIsoDate(item.date)) return null
+  const exception: OccurrenceException = { date: item.date }
+  if (item.deleted === true) exception.deleted = true
+  if (isIsoDate(item.movedTo)) exception.movedTo = item.movedTo
+  if (typeof item.planStart === 'number') exception.planStart = item.planStart
+  if (typeof item.planEnd === 'number') exception.planEnd = item.planEnd
+  if (typeof item.actualStart === 'number') exception.actualStart = item.actualStart
+  if (typeof item.actualEnd === 'number') exception.actualEnd = item.actualEnd
+  if (typeof item.actualCustomized === 'boolean') exception.actualCustomized = item.actualCustomized
+  if (item.actualRemoved === true) exception.actualRemoved = true
+  if (typeof item.title === 'string') exception.title = item.title
+  const color = normalizeColor(item.color)
+  if (color) exception.color = color
+  if (typeof item.actualTitle === 'string') exception.actualTitle = item.actualTitle
+  const actualColor = normalizeColor(item.actualColor)
+  if (actualColor) exception.actualColor = actualColor
+  if (typeof item.planNote === 'string') exception.planNote = item.planNote
+  if (typeof item.actualNote === 'string') exception.actualNote = item.actualNote
+  return exception
+}
+
+function normalizeEntry(value: unknown): Entry | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<Entry>
   const linkOk =
     item.link === null ||
     (typeof item.link === 'object' &&
+      !!item.link &&
       (item.link.kind === 'todo' || item.link.kind === 'subtodo') &&
       typeof item.link.id === 'string')
-  return (
-    typeof item.id === 'string' &&
-    isIsoDate(item.weekStart) &&
-    typeof item.dayIndex === 'number' &&
-    linkOk &&
-    typeof item.title === 'string' &&
-    isColor(item.color) &&
-    typeof item.planStart === 'number' &&
-    typeof item.planEnd === 'number' &&
-    typeof item.actualStart === 'number' &&
-    typeof item.actualEnd === 'number' &&
-    typeof item.actualCustomized === 'boolean'
-  )
+  if (
+    typeof item.id !== 'string' ||
+    !isIsoDate(item.weekStart) ||
+    typeof item.dayIndex !== 'number' ||
+    !linkOk ||
+    typeof item.title !== 'string' ||
+    !isColor(item.color) ||
+    typeof item.planStart !== 'number' ||
+    typeof item.planEnd !== 'number' ||
+    typeof item.actualStart !== 'number' ||
+    typeof item.actualEnd !== 'number' ||
+    typeof item.actualCustomized !== 'boolean'
+  ) {
+    return null
+  }
+  const exceptions = Array.isArray(item.exceptions)
+    ? item.exceptions.flatMap((exception) => {
+        const normalized = normalizeException(exception)
+        return normalized ? [normalized] : []
+      })
+    : []
+  return {
+    id: item.id,
+    weekStart: item.weekStart,
+    dayIndex: item.dayIndex,
+    link: item.link ?? null,
+    title: item.title,
+    color: normalizeColor(item.color) ?? 'blue',
+    planStart: item.planStart,
+    planEnd: item.planEnd,
+    actualStart: item.actualStart,
+    actualEnd: item.actualEnd,
+    actualCustomized: item.actualCustomized,
+    repeat: isRepeat(item.repeat) ? item.repeat : 'none',
+    repeatUntil: isIsoDate(item.repeatUntil) ? item.repeatUntil : null,
+    planNote: typeof item.planNote === 'string' ? item.planNote : '',
+    actualNote: typeof item.actualNote === 'string' ? item.actualNote : '',
+    actualRemoved: item.actualRemoved === true,
+    actualOnly: item.actualOnly === true,
+    actualTitle: typeof item.actualTitle === 'string' ? item.actualTitle : null,
+    actualColor: normalizeColor(item.actualColor),
+    exceptions,
+  }
 }
 
 export function parseState(raw: string): AppState {
@@ -88,8 +158,19 @@ export function parseState(raw: string): AppState {
         : fallback.settings.language
     return {
       version: 1,
-      todos: Array.isArray(data.todos) ? data.todos.filter(isTodo) : [],
-      entries: Array.isArray(data.entries) ? data.entries.filter(isEntry) : [],
+      todos: Array.isArray(data.todos)
+        ? data.todos.flatMap((todo) => {
+            if (!isTodo(todo)) return []
+            const color = normalizeColor(todo.color)
+            return color ? [{ ...todo, color }] : []
+          })
+        : [],
+      entries: Array.isArray(data.entries)
+        ? data.entries.flatMap((entry) => {
+            const normalized = normalizeEntry(entry)
+            return normalized ? [normalized] : []
+          })
+        : [],
       settings: {
         language,
         trackingMode: Boolean(data.settings?.trackingMode),

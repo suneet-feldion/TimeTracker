@@ -1,4 +1,14 @@
-import type { ColorId, Entry, EntryLink, Language, Todo } from './types'
+import type {
+  ColorId,
+  Entry,
+  EntryLink,
+  Lane,
+  Language,
+  OccurrenceException,
+  Repeat,
+  Scope,
+  Todo,
+} from './types'
 
 export const DAY_START = 6 * 60
 export const DAY_END = 23 * 60
@@ -151,11 +161,13 @@ type Timed = {
   actualStart: number
   actualEnd: number
   actualCustomized: boolean
+  actualRemoved?: boolean
+  actualOnly?: boolean
 }
 
 export function withPlanTimes<T extends Timed>(entry: T, start: number, end: number): T {
   const range = clampRange(start, end)
-  if (entry.actualCustomized) {
+  if (entry.actualCustomized || entry.actualRemoved) {
     return { ...entry, planStart: range.start, planEnd: range.end }
   }
   return {
@@ -169,7 +181,13 @@ export function withPlanTimes<T extends Timed>(entry: T, start: number, end: num
 
 export function withActualTimes<T extends Timed>(entry: T, start: number, end: number): T {
   const range = clampRange(start, end)
-  return { ...entry, actualStart: range.start, actualEnd: range.end, actualCustomized: true }
+  return {
+    ...entry,
+    actualStart: range.start,
+    actualEnd: range.end,
+    actualCustomized: true,
+    ...(entry.actualOnly ? { planStart: range.start, planEnd: range.end } : {}),
+  }
 }
 
 export function copyWeekEntries(
@@ -179,20 +197,30 @@ export function copyWeekEntries(
   newId: () => string,
 ): Entry[] {
   return entries
-    .filter((entry) => entry.weekStart === fromWeek)
+    .filter((entry) => entry.weekStart === fromWeek && entry.repeat === 'none')
     .map((entry) => ({
       ...entry,
       id: newId(),
       weekStart: toWeek,
-      actualStart: entry.planStart,
-      actualEnd: entry.planEnd,
-      actualCustomized: false,
+      planStart: entry.actualOnly ? entry.actualStart : entry.planStart,
+      planEnd: entry.actualOnly ? entry.actualEnd : entry.planEnd,
+      actualStart: entry.actualOnly ? entry.actualStart : entry.planStart,
+      actualEnd: entry.actualOnly ? entry.actualEnd : entry.planEnd,
+      actualCustomized: entry.actualOnly,
+      actualRemoved: false,
+      actualTitle: entry.actualOnly ? entry.actualTitle : null,
+      actualColor: entry.actualOnly ? entry.actualColor : null,
+      actualNote: entry.actualOnly ? entry.actualNote : '',
+      exceptions: [],
+      repeatUntil: null,
     }))
 }
 
 export function pastedEntry(source: Entry, weekStart: string, dayIndex: number, id: string): Entry {
-  const duration = Math.max(source.planEnd - source.planStart, MIN_DURATION)
-  const range = moveWithinDay(duration, source.planStart)
+  const start = source.actualOnly ? source.actualStart : source.planStart
+  const end = source.actualOnly ? source.actualEnd : source.planEnd
+  const duration = Math.max(end - start, MIN_DURATION)
+  const range = moveWithinDay(duration, start)
   return {
     ...source,
     id,
@@ -202,7 +230,13 @@ export function pastedEntry(source: Entry, weekStart: string, dayIndex: number, 
     planEnd: range.end,
     actualStart: range.start,
     actualEnd: range.end,
-    actualCustomized: false,
+    actualCustomized: source.actualOnly,
+    actualRemoved: false,
+    actualTitle: source.actualOnly ? source.actualTitle : null,
+    actualColor: source.actualOnly ? source.actualColor : null,
+    repeat: 'none',
+    repeatUntil: null,
+    exceptions: [],
   }
 }
 
@@ -274,4 +308,458 @@ export function layoutColumns(
   }
   flush()
   return result
+}
+
+export type OccurrenceRef = {
+  id: string
+  originDate: string
+  lane: Lane
+}
+
+export type EntryChange =
+  | { kind: 'times'; start: number; end: number; date?: string }
+  | { kind: 'title'; title: string }
+  | { kind: 'color'; color: ColorId }
+  | { kind: 'note'; note: string }
+  | { kind: 'repeat'; repeat: Repeat }
+  | { kind: 'delete' }
+
+export type Occurrence = {
+  id: string
+  originDate: string
+  date: string
+  weekStart: string
+  dayIndex: number
+  link: EntryLink | null
+  title: string
+  color: ColorId
+  titleOverride: boolean
+  colorOverride: boolean
+  actualTitle: string | null
+  actualColor: ColorId | null
+  planStart: number
+  planEnd: number
+  actualStart: number
+  actualEnd: number
+  actualCustomized: boolean
+  actualRemoved: boolean
+  actualOnly: boolean
+  planNote: string
+  actualNote: string
+  repeat: Repeat
+}
+
+export type AppliedChange = {
+  entries: Entry[]
+  focus: OccurrenceRef | null
+}
+
+export function blankEntryFields(): Pick<
+  Entry,
+  | 'repeat'
+  | 'repeatUntil'
+  | 'planNote'
+  | 'actualNote'
+  | 'actualRemoved'
+  | 'actualOnly'
+  | 'actualTitle'
+  | 'actualColor'
+  | 'exceptions'
+> {
+  return {
+    repeat: 'none',
+    repeatUntil: null,
+    planNote: '',
+    actualNote: '',
+    actualRemoved: false,
+    actualOnly: false,
+    actualTitle: null,
+    actualColor: null,
+    exceptions: [],
+  }
+}
+
+export function entryAnchor(entry: Entry): string {
+  return addDays(entry.weekStart, entry.dayIndex)
+}
+
+export function anchorFields(date: string): { weekStart: string; dayIndex: number } {
+  const weekStart = mondayOf(parseISODate(date))
+  const weekday = parseISODate(date).getDay()
+  const dayIndex = weekday === 0 ? 6 : weekday - 1
+  return { weekStart, dayIndex }
+}
+
+export function daysBetween(from: string, to: string): number {
+  const start = parseISODate(from).getTime()
+  const end = parseISODate(to).getTime()
+  return Math.round((end - start) / 86_400_000)
+}
+
+export function occursOn(entry: Entry, date: string): boolean {
+  const anchor = entryAnchor(entry)
+  if (date < anchor) return false
+  if (entry.repeatUntil && date >= entry.repeatUntil) return false
+  if (date === anchor || entry.repeat === 'none') return date === anchor
+  if (entry.repeat === 'daily') return true
+  if (entry.repeat === 'weekly') return daysBetween(anchor, date) % 7 === 0
+  if (entry.repeat === 'weekdays') {
+    const day = parseISODate(date).getDay()
+    return day >= 1 && day <= 5
+  }
+  return parseISODate(date).getDate() === parseISODate(anchor).getDate()
+}
+
+function materialize(entry: Entry, originDate: string, exception: OccurrenceException | undefined, displayDate: string): Occurrence {
+  const place = anchorFields(displayDate)
+  const planStart = exception?.planStart ?? entry.planStart
+  const planEnd = exception?.planEnd ?? entry.planEnd
+  const actualCustomized = exception?.actualCustomized ?? entry.actualCustomized
+  const actualRemoved = Boolean(entry.actualRemoved || exception?.actualRemoved)
+  let actualStart = exception?.actualStart ?? entry.actualStart
+  let actualEnd = exception?.actualEnd ?? entry.actualEnd
+  if (!actualCustomized) {
+    actualStart = planStart
+    actualEnd = planEnd
+  }
+  return {
+    id: entry.id,
+    originDate,
+    date: displayDate,
+    weekStart: place.weekStart,
+    dayIndex: place.dayIndex,
+    link: entry.link,
+    title: exception?.title ?? entry.title,
+    color: exception?.color ?? entry.color,
+    titleOverride: exception?.title !== undefined,
+    colorOverride: exception?.color !== undefined,
+    actualTitle: exception?.actualTitle !== undefined ? exception.actualTitle : entry.actualTitle,
+    actualColor: exception?.actualColor !== undefined ? exception.actualColor : entry.actualColor,
+    planStart,
+    planEnd,
+    actualStart,
+    actualEnd,
+    actualCustomized,
+    actualRemoved,
+    actualOnly: entry.actualOnly,
+    planNote: exception?.planNote !== undefined ? exception.planNote : entry.planNote,
+    actualNote: exception?.actualNote !== undefined ? exception.actualNote : entry.actualNote,
+    repeat: entry.repeat,
+  }
+}
+
+export function occurrenceOn(entry: Entry, originDate: string): Occurrence | null {
+  if (!occursOn(entry, originDate)) return null
+  const exception = entry.exceptions.find((item) => item.date === originDate)
+  if (exception?.deleted) return null
+  const display = exception?.movedTo && exception.movedTo !== originDate ? exception.movedTo : originDate
+  return materialize(entry, originDate, exception, display)
+}
+
+export function occurrencesInWeek(entries: Entry[], weekStart: string): Occurrence[] {
+  const visible = new Set(weekDates(weekStart))
+  const result: Occurrence[] = []
+  for (const entry of entries) {
+    const shown = new Set<string>()
+    for (const date of visible) {
+      if (!occursOn(entry, date)) continue
+      const exception = entry.exceptions.find((item) => item.date === date)
+      if (exception?.deleted) continue
+      const display = exception?.movedTo && exception.movedTo !== date ? exception.movedTo : date
+      if (!visible.has(display)) continue
+      result.push(materialize(entry, date, exception, display))
+      shown.add(date)
+    }
+    for (const exception of entry.exceptions) {
+      if (shown.has(exception.date) || exception.deleted || !exception.movedTo || exception.movedTo === exception.date) continue
+      if (!visible.has(exception.movedTo) || !occursOn(entry, exception.date)) continue
+      result.push(materialize(entry, exception.date, exception, exception.movedTo))
+    }
+  }
+  return result
+}
+
+export function shownOnLane(occurrence: Pick<Occurrence, 'actualOnly' | 'actualRemoved'>, lane: Lane): boolean {
+  if (lane === 'plan') return !occurrence.actualOnly
+  return !occurrence.actualRemoved
+}
+
+export function occurrenceDisplay(
+  occurrence: Occurrence,
+  todos: Todo[],
+  lane: Lane,
+): { title: string; color: ColorId; note: string } {
+  const linked = occurrence.link ? lookupLink(todos, occurrence.link) : null
+  const planTitle = occurrence.titleOverride ? occurrence.title : (linked?.title ?? occurrence.title)
+  const planColor = occurrence.colorOverride ? occurrence.color : (linked?.color ?? occurrence.color)
+  if (lane === 'actual') {
+    return {
+      title: occurrence.actualTitle ?? planTitle,
+      color: occurrence.actualColor ?? planColor,
+      note: occurrence.actualNote,
+    }
+  }
+  return { title: planTitle, color: planColor, note: occurrence.planNote }
+}
+
+function dropsEntry(entry: Entry, lane: Lane): boolean {
+  return lane === 'plan' || entry.actualOnly
+}
+
+function meaningful(exception: Partial<OccurrenceException>): boolean {
+  return Object.entries(exception).some(([key, value]) => key !== 'date' && value !== undefined)
+}
+
+function upsertException(entry: Entry, originDate: string, patch: Partial<OccurrenceException>): Entry {
+  const existing = entry.exceptions.find((item) => item.date === originDate)
+  const merged: OccurrenceException = { ...(existing ?? { date: originDate }), ...patch, date: originDate }
+  for (const key of Object.keys(patch) as (keyof OccurrenceException)[]) {
+    if (patch[key] === undefined) delete merged[key]
+  }
+  const exceptions = entry.exceptions.filter((item) => item.date !== originDate)
+  if (!meaningful(merged)) return { ...entry, exceptions }
+  return { ...entry, exceptions: [...exceptions, merged] }
+}
+
+function shiftException(exception: OccurrenceException, delta: number): OccurrenceException {
+  if (delta === 0) return exception
+  const next: OccurrenceException = { ...exception, date: addDays(exception.date, delta) }
+  if (exception.movedTo) next.movedTo = addDays(exception.movedTo, delta)
+  return next
+}
+
+function applyTemplate(entry: Entry, lane: Lane, change: EntryChange): Entry {
+  switch (change.kind) {
+    case 'delete':
+      return lane === 'actual' ? { ...entry, actualRemoved: true } : entry
+    case 'times':
+      return lane === 'actual' ? withActualTimes(entry, change.start, change.end) : withPlanTimes(entry, change.start, change.end)
+    case 'title':
+      return lane === 'actual' ? { ...entry, actualTitle: change.title } : { ...entry, title: change.title }
+    case 'color':
+      return lane === 'actual' ? { ...entry, actualColor: change.color } : { ...entry, color: change.color }
+    case 'note':
+      return lane === 'actual' ? { ...entry, actualNote: change.note } : { ...entry, planNote: change.note }
+    case 'repeat':
+      return { ...entry, repeat: change.repeat }
+  }
+}
+
+function stripChanged(exceptions: OccurrenceException[], lane: Lane, change: EntryChange): OccurrenceException[] {
+  return exceptions
+    .map((exception) => {
+      const copy: OccurrenceException = { ...exception }
+      if (change.kind === 'times') {
+        delete copy.planStart
+        delete copy.planEnd
+        delete copy.actualStart
+        delete copy.actualEnd
+        delete copy.actualCustomized
+      } else if (change.kind === 'title') {
+        if (lane === 'plan') delete copy.title
+        else delete copy.actualTitle
+      } else if (change.kind === 'color') {
+        if (lane === 'plan') delete copy.color
+        else delete copy.actualColor
+      } else if (change.kind === 'note') {
+        if (lane === 'plan') delete copy.planNote
+        else delete copy.actualNote
+      } else if (change.kind === 'delete' && lane === 'actual') {
+        delete copy.actualRemoved
+      }
+      return copy
+    })
+    .filter(meaningful)
+}
+
+/** Day delta that moves a weekly or monthly series onto the dropped day. Daily and weekday series keep their dates. */
+function seriesDayShift(entry: Entry, originDate: string, lane: Lane, change: EntryChange): number {
+  if (change.kind !== 'times' || lane !== 'plan' || !change.date) return 0
+  if (entry.repeat !== 'weekly' && entry.repeat !== 'monthly') return 0
+  const display = occurrenceOn(entry, originDate)?.date ?? originDate
+  if (change.date === display) return 0
+  return daysBetween(originDate, change.date)
+}
+
+function shiftSeries(entry: Entry, delta: number): Entry {
+  if (delta === 0) return entry
+  return {
+    ...entry,
+    ...anchorFields(addDays(entryAnchor(entry), delta)),
+    repeatUntil: entry.repeatUntil ? addDays(entry.repeatUntil, delta) : null,
+    exceptions: entry.exceptions.map((exception) => shiftException(exception, delta)),
+  }
+}
+
+function replaceEntry(entries: Entry[], id: string, next: Entry | Entry[] | null): Entry[] {
+  const result: Entry[] = []
+  for (const entry of entries) {
+    if (entry.id !== id) {
+      result.push(entry)
+      continue
+    }
+    if (Array.isArray(next)) result.push(...next)
+    else if (next) result.push(next)
+  }
+  return result
+}
+
+function applyToOne(entry: Entry, ref: OccurrenceRef, change: EntryChange): Entry | null {
+  if (entry.repeat === 'none') {
+    if (change.kind === 'delete' && dropsEntry(entry, ref.lane)) return null
+    let next = applyTemplate(entry, ref.lane, change)
+    if (change.kind === 'times' && ref.lane === 'plan' && change.date) next = { ...next, ...anchorFields(change.date) }
+    return next
+  }
+  if (change.kind === 'repeat') return entry
+  if (change.kind === 'delete') {
+    return dropsEntry(entry, ref.lane)
+      ? upsertException(entry, ref.originDate, { deleted: true })
+      : upsertException(entry, ref.originDate, { actualRemoved: true })
+  }
+  if (change.kind === 'times') {
+    const range = clampRange(change.start, change.end)
+    if (ref.lane === 'actual') {
+      return upsertException(entry, ref.originDate, {
+        actualStart: range.start,
+        actualEnd: range.end,
+        actualCustomized: true,
+        ...(entry.actualOnly ? { planStart: range.start, planEnd: range.end } : {}),
+      })
+    }
+    const patch: Partial<OccurrenceException> = { planStart: range.start, planEnd: range.end }
+    if (change.date) patch.movedTo = change.date === ref.originDate ? undefined : change.date
+    return upsertException(entry, ref.originDate, patch)
+  }
+  if (change.kind === 'title') {
+    return upsertException(entry, ref.originDate, ref.lane === 'actual' ? { actualTitle: change.title } : { title: change.title })
+  }
+  if (change.kind === 'color') {
+    return upsertException(entry, ref.originDate, ref.lane === 'actual' ? { actualColor: change.color } : { color: change.color })
+  }
+  return upsertException(entry, ref.originDate, ref.lane === 'actual' ? { actualNote: change.note } : { planNote: change.note })
+}
+
+function retainedException(
+  prior: OccurrenceException,
+  lane: Lane,
+  change: EntryChange,
+  shifting: boolean,
+): Partial<OccurrenceException> | null {
+  const keep: OccurrenceException = { ...prior }
+  delete keep.deleted
+  if (shifting) delete keep.movedTo
+  if (change.kind === 'times') {
+    delete keep.planStart
+    delete keep.planEnd
+    if (lane === 'actual' || !prior.actualCustomized) {
+      delete keep.actualStart
+      delete keep.actualEnd
+      delete keep.actualCustomized
+    }
+  } else if (change.kind === 'title') {
+    if (lane === 'plan') delete keep.title
+    else delete keep.actualTitle
+  } else if (change.kind === 'color') {
+    if (lane === 'plan') delete keep.color
+    else delete keep.actualColor
+  } else if (change.kind === 'note') {
+    if (lane === 'plan') delete keep.planNote
+    else delete keep.actualNote
+  } else if (change.kind === 'delete' && lane === 'actual') {
+    delete keep.actualRemoved
+  }
+  return meaningful(keep) ? keep : null
+}
+
+function applyToAll(entries: Entry[], entry: Entry, ref: OccurrenceRef, change: EntryChange): AppliedChange {
+  if (change.kind === 'delete' && dropsEntry(entry, ref.lane)) {
+    return { entries: replaceEntry(entries, entry.id, null), focus: null }
+  }
+  const delta = seriesDayShift(entry, ref.originDate, ref.lane, change)
+  let next = shiftSeries(entry, delta)
+  next = applyTemplate(next, ref.lane, change)
+  next = { ...next, exceptions: stripChanged(next.exceptions, ref.lane, change) }
+  const origin = delta === 0 ? ref.originDate : addDays(ref.originDate, delta)
+  return {
+    entries: replaceEntry(entries, entry.id, next),
+    focus: { ...ref, id: next.id, originDate: occursOn(next, origin) ? origin : entryAnchor(next) },
+  }
+}
+
+function applyFollowing(
+  entries: Entry[],
+  entry: Entry,
+  ref: OccurrenceRef,
+  change: EntryChange,
+  newId: () => string,
+): AppliedChange {
+  if (ref.originDate <= entryAnchor(entry)) return applyToAll(entries, entry, ref, change)
+  if (change.kind === 'delete' && dropsEntry(entry, ref.lane)) {
+    const truncated = {
+      ...entry,
+      repeatUntil: ref.originDate,
+      exceptions: entry.exceptions.filter((exception) => exception.date < ref.originDate),
+    }
+    return { entries: replaceEntry(entries, entry.id, truncated), focus: null }
+  }
+  const delta = seriesDayShift(entry, ref.originDate, ref.lane, change)
+  const display = occurrenceOn(entry, ref.originDate)?.date ?? ref.originDate
+  const dropDate = change.kind === 'times' && ref.lane === 'plan' ? change.date : undefined
+  const newAnchor = delta !== 0 && dropDate ? dropDate : ref.originDate
+  const prior = entry.exceptions.find((exception) => exception.date === ref.originDate)
+  const truncated = {
+    ...entry,
+    repeatUntil: ref.originDate,
+    exceptions: entry.exceptions.filter((exception) => exception.date < ref.originDate),
+  }
+  let spawned: Entry = {
+    ...entry,
+    id: newId(),
+    ...anchorFields(newAnchor),
+    repeatUntil: entry.repeatUntil && delta !== 0 ? addDays(entry.repeatUntil, delta) : entry.repeatUntil,
+    exceptions: entry.exceptions
+      .filter((exception) => exception.date > ref.originDate)
+      .map((exception) => shiftException(exception, delta)),
+  }
+  spawned = applyTemplate(spawned, ref.lane, change)
+  if ((change.kind === 'title' || change.kind === 'color') && ref.lane === 'plan' && entry.link) {
+    spawned = {
+      ...spawned,
+      link: null,
+      title: change.kind === 'title' ? change.title : (prior?.title ?? entry.title),
+      color: change.kind === 'color' ? change.color : (prior?.color ?? entry.color),
+    }
+  }
+  if (prior) {
+    const retained = retainedException(prior, ref.lane, change, delta !== 0)
+    if (retained) spawned = upsertException(spawned, entryAnchor(spawned), retained)
+  }
+  if (dropDate && dropDate !== display && delta === 0) {
+    spawned = upsertException(spawned, entryAnchor(spawned), {
+      movedTo: dropDate === entryAnchor(spawned) ? undefined : dropDate,
+    })
+  }
+  return {
+    entries: replaceEntry(entries, entry.id, [truncated, spawned]),
+    focus: { ...ref, id: spawned.id, originDate: entryAnchor(spawned) },
+  }
+}
+
+export function applyScopedChange(
+  entries: Entry[],
+  ref: OccurrenceRef,
+  scope: Scope,
+  change: EntryChange,
+  newId: () => string,
+): AppliedChange {
+  const entry = entries.find((item) => item.id === ref.id)
+  if (!entry) return { entries, focus: null }
+  if (scope === 'all' || (scope === 'following' && ref.originDate <= entryAnchor(entry))) {
+    return applyToAll(entries, entry, ref, change)
+  }
+  if (scope === 'following') return applyFollowing(entries, entry, ref, change, newId)
+  const next = applyToOne(entry, ref, change)
+  const focus = next && occurrenceOn(next, ref.originDate) ? ref : null
+  return { entries: replaceEntry(entries, entry.id, next), focus: focus ? { ...ref, id: next?.id ?? ref.id } : null }
 }

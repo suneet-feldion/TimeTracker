@@ -1,14 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import type { Entry, Todo } from './types'
+import { parseState } from './storage'
+import { normalizeColor, type Entry, type Todo } from './types'
 import {
   DAY_END,
   DAY_START,
+  applyScopedChange,
   copyWeekEntries,
   formatWeekRange,
   layoutColumns,
   mondayOf,
   moveWithinDay,
+  occurrenceDisplay,
+  occurrenceOn,
+  occurrencesInWeek,
   pastedEntry,
+  shownOnLane,
   placeDuration,
   rangeFromDrag,
   reorder,
@@ -33,9 +39,53 @@ function entry(overrides: Partial<Entry> = {}): Entry {
     actualStart: 9 * 60,
     actualEnd: 11 * 60,
     actualCustomized: false,
+    repeat: 'none',
+    repeatUntil: null,
+    planNote: '',
+    actualNote: '',
+    actualRemoved: false,
+    actualOnly: false,
+    actualTitle: null,
+    actualColor: null,
+    exceptions: [],
     ...overrides,
   }
 }
+
+describe('palette', () => {
+  it('keeps current colors and folds the retired ones into the ten', () => {
+    expect(normalizeColor('blue')).toBe('blue')
+    expect(normalizeColor('amber')).toBe('gold')
+    expect(normalizeColor('teal')).toBe('green')
+    expect(normalizeColor('cyan')).toBe('blue')
+    const state = parseState(
+      JSON.stringify({
+        todos: [{ id: 't', title: 'Gym', color: 'olive', collapsed: false, order: 0, children: [] }],
+        entries: [
+          {
+            id: 'e',
+            weekStart: '2026-11-02',
+            dayIndex: 0,
+            link: null,
+            title: 'Lesen',
+            color: 'rose',
+            planStart: 600,
+            planEnd: 660,
+            actualStart: 600,
+            actualEnd: 660,
+            actualCustomized: false,
+            actualColor: 'cyan',
+            exceptions: [{ date: '2026-11-02', color: 'brown' }],
+          },
+        ],
+      }),
+    )
+    expect(state.todos[0]?.color).toBe('green')
+    expect(state.entries[0]?.color).toBe('pink')
+    expect(state.entries[0]?.actualColor).toBe('blue')
+    expect(state.entries[0]?.exceptions[0]?.color).toBe('tan')
+  })
+})
 
 describe('weeks start on Monday', () => {
   it('maps Wednesday, Sunday, and Monday onto the same Monday', () => {
@@ -91,6 +141,15 @@ describe('plan and actual times', () => {
     expect(planned.actualStart).toBe(9 * 60)
     expect(planned.actualEnd).toBe(12 * 60)
     expect(planned.actualCustomized).toBe(true)
+  })
+
+  it('leaves a removed actual block removed when the plan changes', () => {
+    const removed = entry({ actualRemoved: true, actualStart: 9 * 60, actualEnd: 10 * 60 })
+    const planned = withPlanTimes(removed, 8 * 60, 9 * 60)
+    expect(planned.planStart).toBe(8 * 60)
+    expect(planned.actualStart).toBe(9 * 60)
+    expect(planned.actualEnd).toBe(10 * 60)
+    expect(planned.actualRemoved).toBe(true)
   })
 })
 
@@ -156,9 +215,9 @@ describe('linked todos', () => {
   })
 
   it('falls back to the snapshot when the link is gone', () => {
-    expect(resolveDisplay(entry({ link: { kind: 'todo', id: 'missing' }, title: 'Gym', color: 'amber' }), todos)).toEqual({
+    expect(resolveDisplay(entry({ link: { kind: 'todo', id: 'missing' }, title: 'Gym', color: 'gold' }), todos)).toEqual({
       title: 'Gym',
-      color: 'amber',
+      color: 'gold',
     })
   })
 })
@@ -216,5 +275,208 @@ describe('overlap layout', () => {
     expect(layout.get('b')?.columns).toBe(2)
     expect(layout.get('a')?.column).not.toBe(layout.get('b')?.column)
     expect(layout.get('c')).toEqual({ column: 0, columns: 1 })
+  })
+})
+
+function ref(originDate: string, lane: 'plan' | 'actual' = 'plan') {
+  return { id: 'entry-1', originDate, lane }
+}
+
+describe('recurrence', () => {
+  const weekly = entry({ repeat: 'weekly' })
+
+  it('places weekly, weekday, and monthly occurrences, skipping a short month', () => {
+    expect(occurrencesInWeek([weekly], '2026-11-09').map((item) => item.date)).toEqual(['2026-11-09'])
+    expect(occurrencesInWeek([entry({ repeat: 'weekdays' })], '2026-11-02')).toHaveLength(5)
+    const monthly = entry({
+      weekStart: '2026-01-26',
+      dayIndex: 5,
+      repeat: 'monthly',
+    })
+    expect(occurrenceOn(monthly, '2026-01-31')).not.toBeNull()
+    expect(occurrenceOn(monthly, '2026-02-28')).toBeNull()
+    expect(occurrenceOn(monthly, '2026-03-31')?.date).toBe('2026-03-31')
+  })
+
+  it('shows a moved occurrence in the destination week and hides it at the origin', () => {
+    const moved = entry({
+      repeat: 'weekly',
+      exceptions: [{ date: '2026-11-09', movedTo: '2026-11-10' }],
+    })
+    expect(occurrencesInWeek([moved], '2026-11-09').map((item) => item.date)).toEqual(['2026-11-10'])
+    expect(occurrencesInWeek([moved], '2026-11-02').map((item) => item.date)).toEqual(['2026-11-02'])
+  })
+
+  it('changes only one plan occurrence and lets its actual time follow', () => {
+    const applied = applyScopedChange([weekly], ref('2026-11-09'), 'one', { kind: 'times', start: 10 * 60, end: 12 * 60 }, () => 'new')
+    const changed = occurrenceOn(applied.entries[0], '2026-11-09')
+    const untouched = occurrenceOn(applied.entries[0], '2026-11-02')
+    expect(changed).toMatchObject({ planStart: 10 * 60, planEnd: 12 * 60, actualStart: 10 * 60, actualEnd: 12 * 60 })
+    expect(untouched).toMatchObject({ planStart: 9 * 60, actualStart: 9 * 60 })
+  })
+
+  it('keeps the plan when only the actual time changes', () => {
+    const applied = applyScopedChange(
+      [weekly],
+      ref('2026-11-09', 'actual'),
+      'one',
+      { kind: 'times', start: 10 * 60, end: 13 * 60 },
+      () => 'new',
+    )
+    expect(occurrenceOn(applied.entries[0], '2026-11-09')).toMatchObject({
+      planStart: 9 * 60,
+      planEnd: 11 * 60,
+      actualStart: 10 * 60,
+      actualEnd: 13 * 60,
+      actualCustomized: true,
+    })
+    expect(occurrenceOn(applied.entries[0], '2026-11-02')).toMatchObject({ actualStart: 9 * 60, actualCustomized: false })
+  })
+
+  it('removes the actual block and leaves the plan block', () => {
+    const applied = applyScopedChange([weekly], ref('2026-11-09', 'actual'), 'one', { kind: 'delete' }, () => 'new')
+    const changed = occurrenceOn(applied.entries[0], '2026-11-09')
+    expect(changed?.actualRemoved).toBe(true)
+    expect(changed?.planStart).toBe(9 * 60)
+    expect(occurrencesInWeek(applied.entries, '2026-11-09')).toHaveLength(1)
+    const later = applyScopedChange(applied.entries, ref('2026-11-02'), 'all', { kind: 'times', start: 8 * 60, end: 9 * 60 }, () => 'newer')
+    expect(occurrenceOn(later.entries[0], '2026-11-09')?.actualRemoved).toBe(true)
+    expect(occurrenceOn(later.entries[0], '2026-11-02')).toMatchObject({ planStart: 8 * 60, actualStart: 8 * 60, actualRemoved: false })
+  })
+
+  it('drops a single plan occurrence without deleting the series', () => {
+    const applied = applyScopedChange([weekly], ref('2026-11-09'), 'one', { kind: 'delete' }, () => 'new')
+    expect(occurrenceOn(applied.entries[0], '2026-11-09')).toBeNull()
+    expect(occurrenceOn(applied.entries[0], '2026-11-16')?.date).toBe('2026-11-16')
+  })
+
+  it('splits the series from the edited occurrence and keeps later exceptions', () => {
+    const series = entry({
+      repeat: 'weekly',
+      exceptions: [{ date: '2026-11-16', planNote: 'später' }],
+    })
+    const applied = applyScopedChange([series], ref('2026-11-09'), 'following', { kind: 'times', start: 8 * 60, end: 9 * 60 }, () => 'new')
+    const oldSeries = applied.entries.find((item) => item.id === 'entry-1')
+    const spawned = applied.entries.find((item) => item.id === 'new')
+    expect(oldSeries?.repeatUntil).toBe('2026-11-09')
+    expect(occurrenceOn(oldSeries!, '2026-11-02')).toMatchObject({ planStart: 9 * 60 })
+    expect(occurrenceOn(spawned!, '2026-11-09')).toMatchObject({ planStart: 8 * 60, actualStart: 8 * 60 })
+    expect(occurrenceOn(spawned!, '2026-11-16')).toMatchObject({ planStart: 8 * 60, planNote: 'später' })
+  })
+
+  it('clears deviant times when the whole series moves', () => {
+    const series = entry({
+      repeat: 'weekly',
+      exceptions: [{ date: '2026-11-09', planStart: 7 * 60, planEnd: 8 * 60 }],
+    })
+    const applied = applyScopedChange([series], ref('2026-11-02'), 'all', { kind: 'times', start: 10 * 60, end: 11 * 60 }, () => 'new')
+    expect(applied.entries[0].exceptions).toEqual([])
+    expect(occurrenceOn(applied.entries[0], '2026-11-09')).toMatchObject({ planStart: 10 * 60, actualStart: 10 * 60 })
+  })
+
+  it('keeps plan and actual notes apart', () => {
+    const applied = applyScopedChange([weekly], ref('2026-11-09', 'actual'), 'one', { kind: 'note', note: 'Ist-Notiz' }, () => 'new')
+    const changed = occurrenceOn(applied.entries[0], '2026-11-09')
+    expect(changed?.actualNote).toBe('Ist-Notiz')
+    expect(changed?.planNote).toBe('')
+    expect(occurrenceOn(applied.entries[0], '2026-11-02')?.actualNote).toBe('')
+    const shown = occurrenceDisplay(changed!, [], 'actual')
+    const plan = occurrenceDisplay(changed!, [], 'plan')
+    expect(shown.note).toBe('Ist-Notiz')
+    expect(plan.note).toBe('')
+  })
+
+  it('copies one-off entries and leaves a repeating series in place', () => {
+    const copied = copyWeekEntries(
+      [entry({ id: 'once' }), entry({ id: 'series', repeat: 'weekly' })],
+      '2026-11-02',
+      '2026-11-09',
+      () => 'copy',
+    )
+    expect(copied.map((item) => item.id)).toEqual(['copy'])
+    expect(copied[0].repeat).toBe('none')
+  })
+
+  it('pastes a repeating entry as a one-off', () => {
+    const copy = pastedEntry(weekly, '2026-11-09', 2, 'pasted')
+    expect(copy).toMatchObject({ repeat: 'none', dayIndex: 2, exceptions: [], actualCustomized: false })
+  })
+
+  it('shows an unplanned actual entry only in the actual lane', () => {
+    const call = entry({
+      id: 'call',
+      title: '',
+      actualTitle: 'Anruf',
+      actualOnly: true,
+      actualCustomized: true,
+      planStart: 11 * 60,
+      planEnd: 12 * 60,
+      actualStart: 11 * 60,
+      actualEnd: 12 * 60,
+    })
+    const gym = entry({ id: 'gym', planStart: 11 * 60, planEnd: 14 * 60, actualStart: 12 * 60, actualEnd: 14 * 60, actualCustomized: true })
+    const callOccurrence = occurrenceOn(call, '2026-11-02')
+    expect(callOccurrence && shownOnLane(callOccurrence, 'plan')).toBe(false)
+    expect(callOccurrence && shownOnLane(callOccurrence, 'actual')).toBe(true)
+    expect(occurrenceDisplay(callOccurrence!, [], 'actual').title).toBe('Anruf')
+    const moved = applyScopedChange(
+      [call, gym],
+      { id: 'call', originDate: '2026-11-02', lane: 'actual' },
+      'all',
+      { kind: 'times', start: 11 * 60, end: 12 * 60 + 15 },
+      () => 'new',
+    )
+    expect(occurrenceOn(moved.entries.find((item) => item.id === 'call')!, '2026-11-02')).toMatchObject({
+      planStart: 11 * 60,
+      planEnd: 12 * 60 + 15,
+      actualStart: 11 * 60,
+      actualEnd: 12 * 60 + 15,
+    })
+    expect(occurrenceOn(moved.entries.find((item) => item.id === 'gym')!, '2026-11-02')).toMatchObject({
+      planStart: 11 * 60,
+      planEnd: 14 * 60,
+    })
+  })
+
+  it('deletes an unplanned actual entry instead of hiding it', () => {
+    const call = entry({ actualOnly: true, actualCustomized: true })
+    const removed = applyScopedChange([call], ref('2026-11-02', 'actual'), 'all', { kind: 'delete' }, () => 'new')
+    expect(removed.entries).toEqual([])
+    const series = entry({ actualOnly: true, repeat: 'weekly' })
+    const one = applyScopedChange([series], ref('2026-11-09', 'actual'), 'one', { kind: 'delete' }, () => 'new')
+    expect(occurrenceOn(one.entries[0], '2026-11-09')).toBeNull()
+    expect(occurrenceOn(one.entries[0], '2026-11-16')).not.toBeNull()
+  })
+
+  it('copies an unplanned actual entry without turning it into a plan block', () => {
+    const call = entry({
+      actualOnly: true,
+      actualCustomized: true,
+      title: '',
+      actualTitle: 'Anruf',
+      actualNote: 'unterwegs',
+      actualStart: 11 * 60,
+      actualEnd: 12 * 60,
+    })
+    const copied = copyWeekEntries([call], '2026-11-02', '2026-11-09', () => 'copy')
+    expect(copied[0]).toMatchObject({
+      actualOnly: true,
+      actualTitle: 'Anruf',
+      actualNote: 'unterwegs',
+      actualStart: 11 * 60,
+      actualEnd: 12 * 60,
+      planStart: 11 * 60,
+      planEnd: 12 * 60,
+    })
+    const pasted = pastedEntry(call, '2026-11-09', 3, 'pasted')
+    expect(pasted).toMatchObject({
+      actualOnly: true,
+      dayIndex: 3,
+      actualTitle: 'Anruf',
+      actualNote: 'unterwegs',
+      actualStart: 11 * 60,
+      planStart: 11 * 60,
+      repeat: 'none',
+    })
   })
 })

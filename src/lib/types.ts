@@ -1,4 +1,4 @@
-export const COLOR_IDS = ['slate', 'red', 'orange', 'amber', 'green', 'teal', 'blue', 'violet'] as const
+export const COLOR_IDS = ['black', 'blue', 'green', 'red', 'yellow', 'gold', 'violet', 'pink', 'gray', 'tan'] as const
 
 export type ColorId = (typeof COLOR_IDS)[number]
 
@@ -9,18 +9,40 @@ export type PaletteColor = {
 }
 
 export const PALETTE: PaletteColor[] = [
-  { id: 'slate', solid: '#5d6b7a', tint: '#e7ebf0' },
-  { id: 'red', solid: '#c4544e', tint: '#f8e6e4' },
-  { id: 'orange', solid: '#d4783a', tint: '#f8eadc' },
-  { id: 'amber', solid: '#b8860b', tint: '#f8f0d8' },
-  { id: 'green', solid: '#2f8f5b', tint: '#e3f3ea' },
-  { id: 'teal', solid: '#1f8a84', tint: '#e2f4f3' },
-  { id: 'blue', solid: '#3a6fd0', tint: '#e5edfa' },
-  { id: 'violet', solid: '#6f56a8', tint: '#eee8f6' },
+  { id: 'black', solid: '#2c313c', tint: '#e6e8ed' },
+  { id: 'blue', solid: '#2f6fe0', tint: '#e7eefc' },
+  { id: 'green', solid: '#1f9a52', tint: '#e5f6ec' },
+  { id: 'red', solid: '#e0454a', tint: '#fdecee' },
+  { id: 'yellow', solid: '#e4d48a', tint: '#f8f3d8' },
+  { id: 'gold', solid: '#d4a24a', tint: '#f8efda' },
+  { id: 'violet', solid: '#7a4ed4', tint: '#f1ebfc' },
+  { id: 'pink', solid: '#e2558f', tint: '#fdecf3' },
+  { id: 'gray', solid: '#8e97a6', tint: '#f1f3f6' },
+  { id: 'tan', solid: '#c4a484', tint: '#f7f1e8' },
 ]
 
+const LEGACY_COLORS: Record<string, ColorId> = {
+  slate: 'gray',
+  orange: 'gold',
+  amber: 'gold',
+  teal: 'green',
+  rose: 'pink',
+  lime: 'yellow',
+  cyan: 'blue',
+  indigo: 'blue',
+  brown: 'tan',
+  olive: 'green',
+  plum: 'violet',
+}
+
+export function normalizeColor(value: unknown): ColorId | null {
+  if (typeof value !== 'string') return null
+  if ((COLOR_IDS as readonly string[]).includes(value)) return value as ColorId
+  return LEGACY_COLORS[value] ?? null
+}
+
 export function colorById(id: ColorId): PaletteColor {
-  return PALETTE.find((color) => color.id === id) ?? PALETTE[6]
+  return PALETTE.find((color) => color.id === id) ?? PALETTE.find((color) => color.id === 'blue') ?? PALETTE[0]
 }
 
 export type Language = 'de' | 'en'
@@ -45,6 +67,31 @@ export type EntryLink = {
   id: string
 }
 
+export const REPEAT_IDS = ['none', 'daily', 'weekdays', 'weekly', 'monthly'] as const
+
+export type Repeat = (typeof REPEAT_IDS)[number]
+
+export type Scope = 'one' | 'following' | 'all'
+
+/** Deviation of a single occurrence. `date` is the original series date. */
+export type OccurrenceException = {
+  date: string
+  deleted?: boolean
+  movedTo?: string
+  planStart?: number
+  planEnd?: number
+  actualStart?: number
+  actualEnd?: number
+  actualCustomized?: boolean
+  actualRemoved?: boolean
+  title?: string
+  color?: ColorId
+  actualTitle?: string
+  actualColor?: ColorId
+  planNote?: string
+  actualNote?: string
+}
+
 export type Entry = {
   id: string
   weekStart: string
@@ -57,6 +104,18 @@ export type Entry = {
   actualStart: number
   actualEnd: number
   actualCustomized: boolean
+  repeat: Repeat
+  /** Exclusive end date. Occurrences on or after this date are not shown. */
+  repeatUntil: string | null
+  planNote: string
+  actualNote: string
+  actualRemoved: boolean
+  /** Shown only in the actual lane. Plan times mirror the actual times and are not drawn. */
+  actualOnly: boolean
+  /** Set when the actual lane has its own title. Null follows the plan title. */
+  actualTitle: string | null
+  actualColor: ColorId | null
+  exceptions: OccurrenceException[]
 }
 
 export type Settings = {
